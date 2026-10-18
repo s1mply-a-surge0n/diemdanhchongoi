@@ -381,28 +381,40 @@ function deleteSection() {
   renderSectionEditor();
 }
 
+/* =====================================================
+   PREVIEW & EDIT INDIVIDUAL SEAT LABELS (FIXED)
+===================================================== */
 function renderGridPreview(section) {
   const preview = document.getElementById("gridPreview");
   if (!preview) return;
 
-  preview.innerHTML = `
-    <div class="preview-grid" style="grid-template-columns: repeat(${section.maxCol}, 55px);">
-      ${section.items
-        .map(
-          item => `
-        <button 
-          type="button"
-          class="preview-seat" 
-          style="grid-column: ${item.col}; grid-row:${item.row};"
-          onclick="editSeatLabel('\${item.id}')"
-        >
-          \${escapeHtml(item.label)}
-        </button>
-      `
-        )
-        .join("")}
-    </div>
-  `;
+  let gridHtml = `<div class="preview-grid" style="grid-template-columns: repeat(${section.maxCol}, 55px);">`;
+
+  section.items.forEach(item => {
+    // Lấy label sạch, nếu rỗng thì tạo mặc định
+    let cleanLabel = item.label || `${numberToLetter(item.row)}${item.col}`;
+    
+    // Nếu nhãn đang bị dính chuỗi code lỗi thì dọn sạch
+    if (cleanLabel.includes("escapeHtml") || cleanLabel.includes("\${")) {
+      cleanLabel = `${numberToLetter(item.row)}${item.col}`;
+      item.label = cleanLabel; // Cập nhật lại vào bộ nhớ
+    }
+
+    gridHtml += `
+      <button 
+        type="button"
+        class="preview-seat" 
+        style="grid-column: ${item.col}; grid-row: ${item.row};"
+        onclick="editSeatLabel('${item.id}')"
+        title="Bấm để đổi tên ghế"
+      >
+        ${escapeHtml(cleanLabel)}
+      </button>
+    `;
+  });
+
+  gridHtml += `</div>`;
+  preview.innerHTML = gridHtml;
 }
 
 function editSeatLabel(seatId) {
