@@ -94,20 +94,6 @@ button {
   gap: 8px;
 }
 
-.seat {
-  width: 65px;
-  height: 65px;
-  border-radius: 10px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  cursor: pointer;
-  border: 2px solid transparent;
-  transition: .15s;
-  overflow: hidden;
-}
-
 .seat:hover {
   transform: translateY(-2px);
 }
@@ -129,13 +115,37 @@ button {
   font-size: 14px;
 }
 
+/* 1. Sửa lớp .seat-name để chữ tự xuống dòng thay vì bị cắt */
 .seat-name {
   font-size: 10px;
+  line-height: 1.1;
   margin-top: 2px;
-  max-width: 55px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  text-align: center;
+  
+  /* Cho phép chữ tự xuống dòng khi tên quá dài */
+  white-space: normal;
+  word-break: break-word;
+  overflow: visible;
+  
+  /* Xóa các thuộc tính cắt chữ cũ */
+  max-width: 100%;
+  text-overflow: unset;
+}
+
+/* 2. Sửa lớp .seat để ô ghế tự giãn chiều cao chứa đủ tên */
+.seat {
+  width: 65px;
+  min-height: 65px; /* Dùng min-height thay vì height cố định */
+  height: auto;     /* Tự co giãn chiều cao theo độ dài của tên */
+  padding: 4px;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: .15s;
 }
 
 .status {
