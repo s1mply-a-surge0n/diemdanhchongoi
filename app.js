@@ -2,7 +2,7 @@ const API_URL =
   "https://script.google.com/macros/s/AKfycbzpoHExr9Oi82mIoxGQkN2MJjWTpPJjbEbqY-6w1FOsdpMWXyTvxzoCroCuURrI3mgH/exec";
 
 /* =====================================================
-   GLOBAL STATE
+   GLOBAL DATA
 ===================================================== */
 let appData = {
   config: [],
@@ -10,7 +10,6 @@ let appData = {
 };
 
 let adminPassword = "";
-let selectedSectionId = null;
 
 /* =====================================================
    INIT
@@ -18,22 +17,30 @@ let selectedSectionId = null;
 document.addEventListener("DOMContentLoaded", loadData);
 
 /* =====================================================
-   LOAD DATA
+   LOAD DATA & SELF-HEALING
 ===================================================== */
 async function loadData() {
   showStatus("Đang tải dữ liệu...", "info");
 
   try {
     const response = await fetch(`${API_URL}?action=getData`);
-    if (!response.ok) throw new Error(`Lỗi kết nối server (${response.status})`);
+    if (!response.ok) throw new Error(`Lỗi kết nối máy chủ (${response.status})`);
 
     const data = await response.json();
-    if (data.status !== "success") throw new Error(data.message || "Lỗi tải dữ liệu");
+    if (data.status !== "success") throw new Error(data.message || "Không tải được dữ liệu.");
 
-    appData.config = data.config || [];
+    // Tự động dọn sạch nhãn ghế nếu dữ liệu trên Google Sheet bị dính chữ code lỗi
+    appData.config = (data.config || []).map(item => {
+      let label = String(item.label || "").trim();
+      if (label.includes("\${") || label.includes("escapeHtml") || !label) {
+        label = `${numberToLetter(item.row || 1)}${item.col || 1}`;
+      }
+      return { ...item, label };
+    });
+
     appData.seats = data.seats || {};
 
-    renderSeatMap();
+    renderSeats();
     showStatus("Đã cập nhật dữ liệu.", "success");
     setTimeout(hideStatus, 1500);
 
@@ -44,90 +51,117 @@ async function loadData() {
 }
 
 /* =====================================================
-   RENDER USER SEAT MAP
+   RENDER SEATS (USER VIEW)
 ===================================================== */
-function renderSeatMap() {
+function renderSeats() {
   const container = document.getElementById("sections");
   if (!container) return;
   container.innerHTML = "";
 
-  const sections = getSections();
+  const sections = groupSections(appData.config);
 
   sections.forEach(section => {
-    const sectionEl = document.createElement("div");
-    sectionEl.className = "section";
+    const sectionElement = document.createElement("div");
+    sectionElement.className = "section";
 
     const title = document.createElement("div");
     title.className = "section-title";
     title.textContent = section.name;
-    sectionEl.appendChild(title);
+    sectionElement.appendChild(title);
 
     const grid = document.createElement("div");
     grid.className = "seat-grid";
-    grid.style.gridTemplateColumns = `repeat(${section.maxCol}, 65px)`;
 
-    section.items.forEach(item => {
-      const seat = document.createElement("div");
-      const occupied = appData.seats[item.id];
+    const maxCol = Math.max(
+      ...section.seats.map(seat => Number(seat.col) || 1),
+      1
+    );
+    grid.style.gridTemplateColumns = `repeat(${maxCol}, 1fr)`;
 
-      seat.className = occupied ? "seat occupied" : "seat available";
-      seat.style.gridRow = item.row;
-      seat.style.gridColumn = item.col;
+    const seats = [...section.seats].sort((a, b) => {
+      const rowA = Number(a.row) || 0;
+      const rowB = Number(b.row) || 0;
+      const colA = Number(a.col) || 0;
+      const colB = Number(b.col) || 0;
 
-      seat.innerHTML = `
-        <div class="seat-number">${escapeHtml(item.label)}</div>
-        <div class="seat-name">${occupied ? escapeHtml(occupied.name) : "Trống"}</div>
-      `;
-
-      seat.onclick = () => handleSeatClick(item);
-      grid.appendChild(seat);
+      if (rowA !== rowB) return rowA - rowB;
+      return colA - colB;
     });
 
-    sectionEl.appendChild(grid);
-    container.appendChild(sectionEl);
+    seats.forEach(seat => {
+      const seatElement = document.createElement("div");
+      seatElement.className = "seat";
+
+      if (seat.row && seat.col) {
+        seatElement.style.gridRow = seat.row;
+        seatElement.style.gridColumn = seat.col;
+      }
+
+      const booking = appData.seats[seat.id];
+      if (booking && booking.name) {
+        seatElement.classList.add("occupied");
+        seatElement.title = `Ghế ${seat.label} - Người đặt: ${booking.name}`; // Tooltip rê chuột hiện tên đầy đủ
+      } else {
+        seatElement.classList.add("available");
+        seatElement.title = `Ghế ${seat.label} (Trống)`;
+      }
+
+      const number = document.createElement("div");
+      number.className = "seat-number";
+      number.textContent = seat.label;
+
+      const name = document.createElement("div");
+      name.className = "seat-name";
+      name.textContent = (booking && booking.name) ? booking.name : "Trống";
+
+      seatElement.appendChild(number);
+      seatElement.appendChild(name);
+
+      seatElement.onclick = () => handleSeatClick(seat);
+      grid.appendChild(seatElement);
+    });
+
+    sectionElement.appendChild(grid);
+    container.appendChild(sectionElement);
   });
 }
 
-function getSections() {
+function groupSections(config) {
   const map = {};
-
-  appData.config.forEach(item => {
-    const secId = item.section_id || "DEFAULT";
-
-    if (!map[secId]) {
-      map[secId] = {
-        id: secId,
-        name: item.section_name || secId,
-        items: [],
-        maxCol: 1
-      };
-    }
-
-    map[secId].items.push(item);
-    map[secId].maxCol = Math.max(map[secId].maxCol, Number(item.col) || 1);
-  });
-
+  config
+    .filter(item => item.type === "seat")
+    .forEach(seat => {
+      const sectionId = seat.section_id || "DEFAULT";
+      if (!map[sectionId]) {
+        map[sectionId] = {
+          id: sectionId,
+          name: seat.section_name || sectionId,
+          seats: []
+        };
+      }
+      map[sectionId].seats.push(seat);
+    });
   return Object.values(map);
 }
 
 /* =====================================================
    BOOK / CANCEL SEAT
 ===================================================== */
-async function handleSeatClick(item) {
-  const occupied = appData.seats[item.id];
+function handleSeatClick(seat) {
+  const booking = appData.seats[seat.id];
 
-  if (occupied) {
-    const confirmCancel = confirm(
-      `Ghế ${item.label} đang được "${occupied.name}" sử dụng.\n\nHủy ghế này?`
+  if (booking && booking.name) {
+    const shouldCancel = confirm(
+      `Ghế ${seat.label} đang được "${booking.name}" sử dụng.\n\nBạn có muốn hủy ghế này không?`
     );
-    if (confirmCancel) await cancelSeat(item.id);
+    if (shouldCancel) cancelSeat(seat.id);
     return;
   }
 
-  const name = prompt(`Bạn đang chọn ghế ${item.label}.\n\nNhập tên của bạn:`);
+  const name = prompt(`Bạn đang chọn ghế ${seat.label}.\n\nNhập tên của bạn:`);
   if (!name || !name.trim()) return;
 
-  await bookSeat(item.id, name.trim());
+  bookSeat(seat.id, name.trim());
 }
 
 async function bookSeat(seatId, name) {
@@ -140,14 +174,17 @@ async function bookSeat(seatId, name) {
       body: JSON.stringify({ action: "book", seatId, name })
     });
 
+    if (!response.ok) throw new Error(`Lỗi kết nối (${response.status})`);
     const data = await response.json();
-    if (data.status !== "success") throw new Error(data.message);
+
+    if (data.status !== "success") throw new Error(data.message || "Không thể đặt ghế.");
 
     await loadData();
-    showStatus("🎉 Đặt ghế thành công!", "success");
+    showStatus("🎉 Đã đặt ghế thành công!", "success");
     setTimeout(hideStatus, 2000);
 
   } catch (error) {
+    console.error(error);
     showStatus("❌ " + error.message, "error");
   }
 }
@@ -162,23 +199,27 @@ async function cancelSeat(seatId) {
       body: JSON.stringify({ action: "cancel", seatId })
     });
 
+    if (!response.ok) throw new Error(`Lỗi kết nối (${response.status})`);
     const data = await response.json();
-    if (data.status !== "success") throw new Error(data.message);
+
+    if (data.status !== "success") throw new Error(data.message || "Không thể hủy ghế.");
 
     await loadData();
     showStatus("🗑️ Đã hủy ghế.", "success");
     setTimeout(hideStatus, 1500);
 
   } catch (error) {
+    console.error(error);
     showStatus("❌ " + error.message, "error");
   }
 }
 
 /* =====================================================
-   ADMIN LOGIN & PANEL MODALS
+   ADMIN LOGIN & MODAL CONTROLS
 ===================================================== */
 function openAdminLogin() {
-  document.getElementById("adminPassword").value = "";
+  const pwdInput = document.getElementById("adminPassword");
+  if (pwdInput) pwdInput.value = "";
   document.getElementById("loginModal").classList.add("show");
 }
 
@@ -187,7 +228,9 @@ function closeAdminLogin() {
 }
 
 async function loginAdmin() {
-  const password = document.getElementById("adminPassword").value.trim();
+  const pwdInput = document.getElementById("adminPassword");
+  const password = pwdInput ? pwdInput.value.trim() : "";
+
   if (!password) {
     alert("Vui lòng nhập mật khẩu.");
     return;
@@ -197,13 +240,12 @@ async function loginAdmin() {
     const response = await fetch(API_URL, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({
-        action: "loginAdmin",
-        password: password
-      })
+      body: JSON.stringify({ action: "loginAdmin", password })
     });
 
+    if (!response.ok) throw new Error(`Lỗi kết nối (${response.status})`);
     const data = await response.json();
+
     if (data.status !== "success") {
       alert("Sai mật khẩu admin.");
       return;
@@ -215,18 +257,12 @@ async function loginAdmin() {
 
   } catch (error) {
     console.error(error);
-    alert("Không thể kết nối server.");
+    alert("Không thể kết nối máy chủ.");
   }
 }
 
 function openAdminPanel() {
-  const sections = getSections();
-  if (sections.length > 0 && !selectedSectionId) {
-    selectedSectionId = sections[0].id;
-  }
-
-  renderAdminSections();
-  renderSectionEditor();
+  renderAdmin();
   document.getElementById("adminModal").classList.add("show");
 }
 
@@ -235,206 +271,167 @@ function closeAdminPanel() {
 }
 
 /* =====================================================
-   ADMIN EDITOR
+   ADMIN RENDER & GRID GENERATOR
 ===================================================== */
-function renderAdminSections() {
+function renderAdmin() {
   const container = document.getElementById("adminSections");
   if (!container) return;
   container.innerHTML = "";
 
-  getSections().forEach(section => {
-    const div = document.createElement("div");
-    div.className = `admin-section-item ${section.id === selectedSectionId ? "active" : ""}`;
+  const sections = groupSections(appData.config);
 
-    div.innerHTML = `
-      <strong>${escapeHtml(section.name)}</strong><br>
-      <small style="color:#666">${section.items.length} ghế</small>
+  if (sections.length === 0) {
+    container.innerHTML = `
+      <div style="text-align:center; padding: 20px;">
+        <p>Chưa có khu vực nào.</p>
+        <button class="btn-primary" onclick="addNewSection()">+ Tạo khu vực mới</button>
+      </div>
     `;
+    return;
+  }
 
-    div.onclick = () => {
-      selectedSectionId = section.id;
-      renderAdminSections();
-      renderSectionEditor();
-    };
+  // Nút tạo thêm khu vực ở trên cùng
+  const topBar = document.createElement("div");
+  topBar.style.marginBottom = "15px";
+  topBar.innerHTML = `<button class="btn-primary" onclick="addNewSection()">+ Tạo khu vực mới</button>`;
+  container.appendChild(topBar);
 
-    container.appendChild(div);
+  sections.forEach(section => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "admin-section";
+
+    const header = document.createElement("div");
+    header.className = "admin-section-header";
+
+    const title = document.createElement("strong");
+    title.textContent = `${section.name} (${section.seats.length} ghế)`;
+
+    const actions = document.createElement("div");
+    actions.style.display = "flex";
+    actions.style.gap = "8px";
+
+    const btnChangeCount = document.createElement("button");
+    btnChangeCount.className = "btn-secondary";
+    btnChangeCount.textContent = "⚙️ Đổi số ghế";
+    btnChangeCount.onclick = () => changeSectionSeatCount(section.id);
+
+    const btnDelete = document.createElement("button");
+    btnDelete.className = "btn-secondary";
+    btnDelete.style.color = "#dc2626";
+    btnDelete.textContent = "🗑️ Xóa khu";
+    btnDelete.onclick = () => deleteSection(section.id);
+
+    actions.appendChild(btnChangeCount);
+    actions.appendChild(btnDelete);
+
+    header.appendChild(title);
+    header.appendChild(actions);
+    wrapper.appendChild(header);
+
+    const grid = document.createElement("div");
+    grid.className = "admin-grid";
+
+    section.seats.forEach(seat => {
+      const button = document.createElement("button");
+      button.className = "admin-seat";
+      button.textContent = seat.label;
+      button.title = "Bấm để đổi nhãn tên ghế";
+
+      button.onclick = () => {
+        const newLabel = prompt("Nhập tên ghế mới:", seat.label);
+        if (newLabel && newLabel.trim()) {
+          seat.label = newLabel.trim();
+          renderAdmin();
+        }
+      };
+
+      grid.appendChild(button);
+    });
+
+    wrapper.appendChild(grid);
+    container.appendChild(wrapper);
   });
 }
 
-function renderSectionEditor() {
-  const editor = document.getElementById("sectionEditor");
-  if (!editor) return;
+function changeSectionSeatCount(sectionId) {
+  const currentSeats = appData.config.filter(
+    item => item.type === "seat" && item.section_id === sectionId
+  );
+  const sectionName = currentSeats[0]?.section_name || sectionId;
 
-  if (!selectedSectionId) {
-    editor.innerHTML = `<div style="text-align:center; padding:40px; color:#888">Chọn một khu vực ở danh sách bên trái để chỉnh sửa.</div>`;
+  const rowsInput = prompt(`Nhập số HÀNG ghế mới cho [${sectionName}]:`, "5");
+  if (!rowsInput) return;
+
+  const colsInput = prompt(`Nhập số CỘT ghế mỗi hàng:`, "6");
+  if (!colsInput) return;
+
+  const rows = parseInt(rowsInput, 10);
+  const cols = parseInt(colsInput, 10);
+
+  if (isNaN(rows) || isNaN(cols) || rows <= 0 || cols <= 0) {
+    alert("Số hàng và cột phải là số nguyên lớn hơn 0!");
     return;
   }
 
-  const section = getSections().find(s => s.id === selectedSectionId);
-  if (!section) return;
+  appData.config = appData.config.filter(
+    item => !(item.type === "seat" && item.section_id === sectionId)
+  );
 
-  const maxRow = Math.max(...section.items.map(item => Number(item.row) || 1), 1);
-
-  editor.innerHTML = `
-    <h3>Chỉnh sửa: ${escapeHtml(section.name)}</h3>
-    
-    <div class="form-group">
-      <label>Tên khu vực</label>
-      <input id="editSectionName" value="${escapeAttribute(section.name)}">
-    </div>
-
-    <div class="form-row">
-      <div class="form-group">
-        <label>Số hàng</label>
-        <input id="editRows" type="number" min="1" value="${maxRow}">
-      </div>
-      <div class="form-group">
-        <label>Số cột</label>
-        <input id="editCols" type="number" min="1" value="${section.maxCol}">
-      </div>
-    </div>
-
-    <div style="display:flex; gap:10px; margin-bottom: 15px;">
-      <button class="btn-primary" onclick="generateGrid()">⚙️ Tạo lại lưới ghế</button>
-      <button class="btn-danger" onclick="deleteSection()">🗑️ Xóa khu vực</button>
-    </div>
-
-    <div class="preview-box">
-      <strong>Preview (Bấm vào ghế để đổi tên nhãn):</strong>
-      <div id="gridPreview"></div>
-    </div>
-  `;
-
-  renderGridPreview(section);
-}
-
-function generateGrid() {
-  const section = getSections().find(s => s.id === selectedSectionId);
-  if (!section) return;
-
-  const name = document.getElementById("editSectionName").value.trim();
-  const rows = Number(document.getElementById("editRows").value);
-  const cols = Number(document.getElementById("editCols").value);
-
-  if (!name || rows < 1 || cols < 1) {
-    alert("Vui lòng nhập đầy đủ thông tin hợp lệ.");
-    return;
-  }
-
-  const newItems = [];
   for (let r = 1; r <= rows; r++) {
     for (let c = 1; c <= cols; c++) {
-      const old = section.items.find(
-        item => Number(item.row) === r && Number(item.col) === c
-      );
-
-      newItems.push({
-        id: old?.id || `${section.id}_R${r}C${c}`,
-        section_id: section.id,
-        section_name: name,
+      appData.config.push({
         type: "seat",
+        id: `${sectionId}_R${r}C${c}`,
+        section_id: sectionId,
+        section_name: sectionName,
         row: r,
         col: c,
-        label: old?.label || `${numberToLetter(r)}${c}`,
-        enabled: true
+        label: `${numberToLetter(r)}${c}`
       });
     }
   }
 
-  appData.config = appData.config.filter(item => item.section_id !== section.id);
-  appData.config.push(...newItems);
-
-  renderAdminSections();
-  renderSectionEditor();
+  renderAdmin();
 }
 
-function addSection() {
-  const newId = "SEC_" + Date.now();
+function addNewSection() {
+  const name = prompt("Nhập tên khu vực mới (Ví dụ: Khu VIP, Bàn Giáo Viên):", "Khu vực mới");
+  if (!name || !name.trim()) return;
+
+  const sectionId = "SEC_" + Date.now();
   appData.config.push({
-    id: `${newId}_R1C1`,
-    section_id: newId,
-    section_name: "Khu vực mới",
     type: "seat",
+    id: `${sectionId}_R1C1`,
+    section_id: sectionId,
+    section_name: name.trim(),
     row: 1,
     col: 1,
-    label: "A1",
-    enabled: true
+    label: "A1"
   });
 
-  selectedSectionId = newId;
-  renderAdminSections();
-  renderSectionEditor();
+  renderAdmin();
 }
 
-function deleteSection() {
-  if (!selectedSectionId) return;
-
-  const section = getSections().find(s => s.id === selectedSectionId);
+function deleteSection(sectionId) {
+  const section = groupSections(appData.config).find(s => s.id === sectionId);
   if (!section) return;
 
-  if (!confirm(`Bạn có muốn xóa khu vực "${section.name}" không?`)) return;
-
-  appData.config = appData.config.filter(item => item.section_id !== selectedSectionId);
-  selectedSectionId = null;
-
-  renderAdminSections();
-  renderSectionEditor();
+  if (confirm(`Bạn có chắc chắn muốn xóa khu vực "${section.name}"?`)) {
+    appData.config = appData.config.filter(item => item.section_id !== sectionId);
+    renderAdmin();
+  }
 }
 
 /* =====================================================
-   PREVIEW & EDIT INDIVIDUAL SEAT LABELS (FIXED)
+   SAVE ADMIN CONFIG
 ===================================================== */
-function renderGridPreview(section) {
-  const preview = document.getElementById("gridPreview");
-  if (!preview) return;
-
-  let gridHtml = `<div class="preview-grid" style="grid-template-columns: repeat(${section.maxCol}, 55px);">`;
-
-  section.items.forEach(item => {
-    // Lấy label sạch, nếu rỗng thì tạo mặc định
-    let cleanLabel = item.label || `${numberToLetter(item.row)}${item.col}`;
-    
-    // Nếu nhãn đang bị dính chuỗi code lỗi thì dọn sạch
-    if (cleanLabel.includes("escapeHtml") || cleanLabel.includes("\${")) {
-      cleanLabel = `${numberToLetter(item.row)}${item.col}`;
-      item.label = cleanLabel; // Cập nhật lại vào bộ nhớ
-    }
-
-    gridHtml += `
-      <button 
-        type="button"
-        class="preview-seat" 
-        style="grid-column: ${item.col}; grid-row: ${item.row};"
-        onclick="editSeatLabel('${item.id}')"
-        title="Bấm để đổi tên ghế"
-      >
-        ${escapeHtml(cleanLabel)}
-      </button>
-    `;
-  });
-
-  gridHtml += `</div>`;
-  preview.innerHTML = gridHtml;
-}
-
-function editSeatLabel(seatId) {
-  const seat = appData.config.find(item => item.id === seatId);
-  if (!seat) return;
-
-  const newLabel = prompt("Nhập tên nhãn ghế mới:", seat.label);
-  if (newLabel && newLabel.trim()) {
-    seat.label = newLabel.trim();
-    renderSectionEditor();
-  }
-}
-
 async function saveAdminConfig() {
   if (!adminPassword) {
-    alert("Phiên admin đã hết hạn.");
+    alert("Phiên làm việc Admin đã hết hạn.");
     return;
   }
 
-  showStatus("Đang lưu cấu trúc...", "info");
+  showStatus("Đang lưu cấu trúc phòng...", "info");
 
   try {
     const response = await fetch(API_URL, {
@@ -447,15 +444,18 @@ async function saveAdminConfig() {
       })
     });
 
+    if (!response.ok) throw new Error(`Lỗi kết nối (${response.status})`);
     const data = await response.json();
-    if (data.status !== "success") throw new Error(data.message || "Lỗi lưu cấu trúc");
 
-    alert("🎉 Đã lưu cấu trúc sơ đồ thành công!");
+    if (data.status !== "success") throw new Error(data.message || "Không thể lưu.");
+
     closeAdminPanel();
     await loadData();
+    showStatus("💾 Đã lưu cấu trúc phòng thành công!", "success");
+    setTimeout(hideStatus, 2000);
 
   } catch (error) {
-    alert(error.message || "Không thể lưu.");
+    console.error(error);
     showStatus("❌ " + error.message, "error");
   }
 }
@@ -463,38 +463,24 @@ async function saveAdminConfig() {
 /* =====================================================
    UTILITIES
 ===================================================== */
-function numberToLetter(number) {
+function numberToLetter(num) {
   let result = "";
-  while (number > 0) {
-    const remainder = (number - 1) % 26;
+  while (num > 0) {
+    const remainder = (num - 1) % 26;
     result = String.fromCharCode(65 + remainder) + result;
-    number = Math.floor((number - 1) / 26);
+    num = Math.floor((num - 1) / 26);
   }
   return result;
 }
 
-function escapeHtml(value) {
-  if (value === null || value === undefined) return "";
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function escapeAttribute(value) {
-  return escapeHtml(value);
-}
-
 function showStatus(message, type) {
-  const el = document.getElementById("status");
-  if (!el) return;
-  el.textContent = message;
-  el.className = `status show ${type}`;
+  const element = document.getElementById("status");
+  if (!element) return;
+  element.textContent = message;
+  element.className = `status show ${type}`;
 }
 
 function hideStatus() {
-  const el = document.getElementById("status");
-  if (el) el.className = "status";
+  const element = document.getElementById("status");
+  if (element) element.className = "status";
 }
